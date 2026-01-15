@@ -1,0 +1,370 @@
+-- // CONFIGURATION //
+-- PASTE YOUR RAW GITHUB LINK INSIDE THE QUOTES BELOW:
+local ScriptURL = "YOUR_RAW_GITHUB_URL_HERE" 
+
+-- // TELEPORT PERSISTENCE CHECK //
+if getgenv().BrevHubLoaded then return end
+getgenv().BrevHubLoaded = true
+
+-- // TELEPORT HANDLER (URL VERSION) //
+local queue_on_teleport = queue_on_teleport or syn and syn.queue_on_teleport
+if queue_on_teleport then
+    game:GetService("Players").LocalPlayer.OnTeleport:Connect(function(State)
+        if State == Enum.TeleportState.Started then
+            -- This command runs on the NEXT server
+            queue_on_teleport(string.format([[
+                task.wait(2)
+                loadstring(game:HttpGet("%s"))()
+            ]], ScriptURL))
+        end
+    end)
+end
+
+-- // MAIN SCRIPT STARTS HERE //
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local LocalPlayer = Players.LocalPlayer
+
+-- // DYNAMIC GAME INFO //
+local Success, GameInfo = pcall(function()
+    return MarketplaceService:GetProductInfo(game.PlaceId)
+end)
+local GameName = Success and GameInfo.Name or "Unknown Game"
+
+-- // CREATE WINDOW //
+local Window = Rayfield:CreateWindow({
+   Name = "Brev Hub | " .. GameName,
+   LoadingTitle = "Brev Hub",
+   LoadingSubtitle = "Brev Hub | " .. LocalPlayer.Name,
+   ConfigurationSaving = {
+      Enabled = true,
+      FolderName = "BrevHub",
+      FileName = "BrainrotThiefConfig"
+   },
+   KeySystem = false,
+})
+
+local MainTab = Window:CreateTab("Main", 4483362458)
+
+-- // CONFIG //
+local Config = {
+    AutoSteal = false,
+    ESP = false,
+    TeleportDelay = 0,
+    StealthMode = true,
+    Noclip = false
+}
+
+-- STATE
+local Blacklist = {} 
+local CurrentTargetPrompt = nil
+local TargetAttemptStart = 0
+
+-- // RARITY COLORS //
+local RarityColors = {
+    ["Common"] = Color3.fromRGB(183, 191, 197),
+    ["Uncommon"] = Color3.fromRGB(0, 212, 71),
+    ["Rare"] = Color3.fromRGB(0, 175, 255),
+    ["Legendary"] = Color3.fromRGB(255, 157, 0),
+    ["Mythical"] = Color3.fromRGB(206, 89, 255),
+    ["Diamond"] = Color3.fromRGB(80, 255, 255)
+}
+
+-- // PHYSICS HANDLERS //
+local function EnableNoclip()
+    Config.Noclip = true
+    task.spawn(function()
+        while Config.Noclip or Config.AutoSteal do
+            if LocalPlayer.Character then
+                for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+                    if part:IsA("BasePart") and part.CanCollide == true then
+                        part.CanCollide = false
+                    end
+                end
+            end
+            RunService.Stepped:Wait()
+        end
+    end)
+end
+
+local function EnableAntiGravity()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    local root = char.HumanoidRootPart
+    if not root:FindFirstChild("BrevFly") then
+        local bv = Instance.new("BodyVelocity")
+        bv.Name = "BrevFly"
+        bv.MaxForce = Vector3.new(100000, 100000, 100000)
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
+    end
+end
+
+local function DisableAntiGravity()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        local bv = char.HumanoidRootPart:FindFirstChild("BrevFly")
+        if bv then bv:Destroy() end
+    end
+end
+
+-- // HELPER FUNCTIONS //
+local function GetRarityColor(prompt)
+    if not prompt then return Color3.fromRGB(255, 255, 255) end
+    local rarity = prompt:GetAttribute("Rarity") or "Common"
+    if prompt:GetAttribute("Diamond") then return RarityColors["Diamond"] end
+    return RarityColors[rarity] or Color3.fromRGB(255, 255, 255)
+end
+
+local function GetPrice(prompt)
+    if not prompt then return "???" end
+    local worth = prompt:GetAttribute("Worth")
+    if worth then return "$" .. tostring(worth) end
+    if prompt:GetAttribute("Diamond") then return "+Gems" end
+    return "???"
+end
+
+-- // ACTIONS //
+local function TeleportTo(cframe)
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    
+    root.CFrame = cframe
+end
+
+local function GoToTruckAndSell(useEscapePoint)
+    local Map = Workspace:FindFirstChild("Map")
+    if not Map then return end
+    
+    local SellPart = Map:FindFirstChild("CollectTruck") and Map.CollectTruck:FindFirstChild("TouchPart")
+    
+    local EscapeAttachment = nil
+    if Map:FindFirstChild("Truck") and Map.Truck:FindFirstChild("Model") and Map.Truck.Model:FindFirstChild("Seat") then
+        EscapeAttachment = Map.Truck.Model.Seat:FindFirstChild("Attachment")
+    end
+
+    Rayfield:Notify({Title = "Status", Content = useEscapePoint and "Map Clear! Escaping..." or "Bag Full! Selling...", Duration = 1.5})
+    
+    if useEscapePoint and EscapeAttachment then
+        TeleportTo(EscapeAttachment.WorldCFrame + Vector3.new(0, 2, 0))
+    elseif SellPart then
+        TeleportTo(SellPart.CFrame + Vector3.new(0, 2, 0))
+    else
+        Rayfield:Notify({Title = "Error", Content = "Could not find Truck/Sell Part!", Duration = 2})
+    end
+    
+    CurrentTargetPrompt = nil
+end
+
+local function TeleportAndSteal(targetPart, prompt)
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    EnableNoclip()
+    EnableAntiGravity()
+
+    local offset = Vector3.new(0, -8, 0) -- Stealth Underground
+
+    TeleportTo(targetPart.CFrame + offset)
+    
+    if prompt and prompt:IsDescendantOf(Workspace) then
+        prompt.HoldDuration = 0 
+        prompt.MaxActivationDistance = 50 
+        fireproximityprompt(prompt)
+    end
+end
+
+local function RunAutoSteal()
+    local StealableFolder = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("StealableItems")
+    
+    while Config.AutoSteal do
+        if not StealableFolder then 
+             StealableFolder = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("StealableItems")
+             task.wait(1)
+             continue
+        end
+
+        local bestTargetPart = nil
+        local bestPrompt = nil
+        local highestWorth = -1
+        local foundAny = false
+
+        -- DEEP SCAN
+        for _, obj in ipairs(StealableFolder:GetDescendants()) do
+            if obj:IsA("ProximityPrompt") and obj.Enabled then
+                local itemModel = obj.Parent
+                
+                -- Ignore Blacklisted
+                if not Blacklist[obj] then 
+                    foundAny = true 
+                    local worth = obj:GetAttribute("Worth") or 0
+                    if obj:GetAttribute("Diamond") then worth = 999999999 end
+                    
+                    if worth > highestWorth then
+                        local targetPart = (itemModel:IsA("BasePart") and itemModel) or (itemModel:IsA("Model") and itemModel.PrimaryPart)
+                        
+                        if targetPart then
+                            highestWorth = worth
+                            bestTargetPart = targetPart
+                            bestPrompt = obj
+                        end
+                    end
+                end
+            end
+        end
+
+        if bestTargetPart and bestPrompt then
+            -- Found Target
+            if CurrentTargetPrompt ~= bestPrompt then
+                CurrentTargetPrompt = bestPrompt
+                TargetAttemptStart = tick()
+            end
+
+            -- STUCK CHECK (2 Seconds = Bag Full)
+            if tick() - TargetAttemptStart > 1 then
+                GoToTruckAndSell(false) -- Sell
+                task.wait(1) 
+            else
+                TeleportAndSteal(bestTargetPart, bestPrompt)
+            end
+        else
+            -- Map Empty or No Targets
+            if not foundAny then
+                GoToTruckAndSell(true) -- Escape
+                task.wait(1) 
+            else
+                task.wait(0.5)
+            end
+        end
+        RunService.Heartbeat:Wait()
+    end
+    
+    DisableAntiGravity()
+    Config.Noclip = false
+    CurrentTargetPrompt = nil
+end
+
+-- // ESP ENGINE //
+local ESP_Holder = Instance.new("Folder", game.CoreGui)
+ESP_Holder.Name = "BrevHub_ESP"
+
+local function UpdateESP()
+    ESP_Holder:ClearAllChildren()
+    if not Config.ESP then return end
+    
+    local StealableFolder = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("StealableItems")
+    if not StealableFolder then return end
+
+    for _, prompt in ipairs(StealableFolder:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
+            local item = prompt.Parent
+            local targetPart = (item:IsA("BasePart") and item) or (item:IsA("Model") and item.PrimaryPart)
+            
+            if targetPart then
+                local bbg = Instance.new("BillboardGui")
+                bbg.Adornee = targetPart
+                bbg.Size = UDim2.new(0, 200, 0, 50)
+                bbg.StudsOffset = Vector3.new(0, 0, 0)
+                bbg.AlwaysOnTop = true
+                bbg.Parent = ESP_Holder
+
+                local dot = Instance.new("Frame")
+                dot.Size = UDim2.new(0, 6, 0, 6)
+                dot.Position = UDim2.new(0.5, -3, 0.5, -3)
+                dot.BackgroundColor3 = GetRarityColor(prompt)
+                dot.BorderSizePixel = 0
+                dot.Parent = bbg
+                
+                local corner = Instance.new("UICorner")
+                corner.CornerRadius = UDim.new(1, 0)
+                corner.Parent = dot
+
+                local txt = Instance.new("TextLabel")
+                txt.Size = UDim2.new(1, 0, 1, 0)
+                txt.Position = UDim2.new(0, 0, 0, -10)
+                txt.BackgroundTransparency = 1
+                txt.TextStrokeTransparency = 0.5
+                txt.TextColor3 = GetRarityColor(prompt)
+                txt.Text = item.Name .. " [" .. GetPrice(prompt) .. "]"
+                txt.Font = Enum.Font.GothamBold
+                txt.TextSize = 11
+                txt.Parent = bbg
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        if Config.ESP then UpdateESP() end
+        task.wait(1)
+    end
+end)
+
+-- // SAFETY (Background) //
+task.spawn(function()
+    local NPCRemotes = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("NPCRemotes")
+    if NPCRemotes then
+        local meta = getrawmetatable(game)
+        local oldNamecall = meta.__namecall
+        setreadonly(meta, false)
+
+        meta.__namecall = newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if method == "FireServer" and self.Parent == NPCRemotes then
+                return nil 
+            end
+            return oldNamecall(self, ...)
+        end)
+        setreadonly(meta, true)
+    end
+
+    while true do
+        for _, npc in ipairs(Workspace:GetDescendants()) do
+            if npc:IsA("Model") and npc:FindFirstChild("Humanoid") and npc.Name ~= LocalPlayer.Name then
+                local head = npc:FindFirstChild("Head")
+                if head then head:Destroy() end
+            end
+        end
+        task.wait(5)
+    end
+end)
+
+-- // UI //
+
+MainTab:CreateToggle({
+   Name = "Auto Steal",
+   CurrentValue = false,
+   Flag = "AutoSteal",
+   Callback = function(Value)
+       Config.AutoSteal = Value
+       if Value then 
+           Blacklist = {} 
+           task.spawn(RunAutoSteal) 
+       else
+           DisableAntiGravity()
+           Config.Noclip = false
+           GoToTruckAndSell(false)
+       end
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Item ESP",
+   CurrentValue = false,
+   Flag = "ItemESP",
+   Callback = function(Value)
+       Config.ESP = Value
+       if not Value then ESP_Holder:ClearAllChildren() end
+   end,
+})
+
+-- Load Settings
+Rayfield:LoadConfiguration()
